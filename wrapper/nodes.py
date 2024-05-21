@@ -94,6 +94,9 @@ class Node(ABC, object):
         return human_readable
 
 class SystemNode(Node):
+    '''
+    Node representing computers (servers, users, and routers)
+    '''
     def __init__(self, uuid: int, observation: dict, is_server=False, is_router=False, crown_jewel=False):
         self.feats = OrderedDict(
             Architecture = None,
@@ -133,6 +136,9 @@ class SystemNode(Node):
         )
 
 class ConnectionNode(Node):
+    '''
+    Node representing processes that communicate with other hosts 
+    '''
     def __init__(self, uuid: int, observation: dict=dict(), suspicious_pid: bool=False, is_decoy: bool=False, is_default=False, is_ephemeral=False):
         self.feats = OrderedDict(
             process_name = None,
@@ -159,6 +165,12 @@ class ConnectionNode(Node):
         )
 
 def init_decoy(uuid, dtype):
+    '''
+    ConnectionNode factory. Creates the relevant kind of decoy 
+    Args: 
+        uuid: unique identifier (int)
+        dtype: what kind of decoy we're making (str)
+    '''
     d = {
         'apache2': dict(
             process_name=Enums.ProcessName.APACHE2,
@@ -170,11 +182,12 @@ def init_decoy(uuid, dtype):
             process_type=Enums.ProcessType.WEBSERVER
         ),
         'vsftpd': dict(
-            process_name=Enums.ProcessName.UNKNOWN, # Also not in the enum
+            # Also not in the enum
+            process_name=Enums.ProcessName.UNKNOWN, 
             process_type=Enums.ProcessType.WEBSERVER
         ),
         'haraka': dict(
-            # Also in ProcessVersion but not ProcessName. Why
+            # Also in ProcessVersion but not ProcessName
             process_name=Enums.ProcessName.UNKNOWN,
             process_type=Enums.ProcessType.SMTP
         )
@@ -184,7 +197,7 @@ def init_decoy(uuid, dtype):
 
 class InternetNode(Node):
     '''
-    No features
+    No features. Purely a structural node
     '''
     def __init__(self, uuid: int, observation: dict=dict()):
         self.feats = OrderedDict()
@@ -198,6 +211,10 @@ class InternetNode(Node):
         return []
 
 class FileNode(Node):
+    '''
+    Nodes representing files on workstations. 
+    These are almost always malicious. 
+    '''
     def __init__(self, uuid: int, observation: dict, is_new=True):
         self.feats = OrderedDict(
             [

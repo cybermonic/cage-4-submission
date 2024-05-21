@@ -6,7 +6,7 @@ from CybORG.Agents import BaseAgent
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 
 ### Import custom agents here ###
-from models.cage4 import load_inductive_ppo
+from models.cage4 import load
 from wrapper.graph_wrapper import GraphWrapper
 
 class Submission:
@@ -22,7 +22,7 @@ class Submission:
 
     # Use this function to define your agents.
     AGENTS = {
-        f"blue_agent_{i}": load_inductive_ppo(f'{os.path.dirname(__file__)}/weights/gnn_ppo-{i}.pt')
+        f"blue_agent_{i}": load(f'{os.path.dirname(__file__)}/weights/gnn_ppo-{i}.pt')
         for i in range(5)
     }
 

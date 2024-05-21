@@ -277,6 +277,11 @@ class InductiveCriticNetwork(nn.Module):
 
 
 class InductiveGraphPPOAgent():
+    '''
+    Class to manage agents' memories and learning (when training)
+    When training is complete, uses the InductiveActorNetwork to decide
+    which action to take
+    '''
     def __init__(self, in_dim, gamma=0.99, lmbda=0.95, clip=0.1, bs=5, epochs=6,
                  a_kwargs=dict(), c_kwargs=dict(), training=True, concat_edges=False):
 
@@ -290,6 +295,7 @@ class InductiveGraphPPOAgent():
             a_kwargs=a_kwargs, c_kwargs=c_kwargs, training=training, concat_edges=concat_edges
         )
 
+        # PPO Hyperparams
         self.gamma = gamma
         self.lmbda = lmbda
         self.clip = clip
@@ -304,17 +310,39 @@ class InductiveGraphPPOAgent():
     def end_episode(self):
         pass
 
+    # Required by CAGE but not utilized
     def set_initial_values(self, action_space, observation):
         pass
 
     def train(self):
+        '''
+        Set modules to training mode
+        '''
         self.actor.train()
         self.critic.train()
 
     def eval(self):
+        '''
+        Set modules to eval mode 
+        '''
         self.training = False
         self.actor.eval()
         self.critic.eval()
+
+    def _zero_grad(self):
+        '''
+        Reset opt
+        '''
+        self.actor.opt.zero_grad()
+        self.critic.opt.zero_grad()
+
+    def _step(self):
+        '''
+        Call opt autograd
+        '''
+        self.actor.opt.step()
+        self.critic.opt.step()
+
 
     def set_deterministic(self, val):
         self.deterministic = val
@@ -331,8 +359,15 @@ class InductiveGraphPPOAgent():
             'agent': me
         }, outf)
 
-    #@torch.no_grad()
+    @torch.no_grad()
     def get_action(self, obs, *args):
+        '''
+        Sample an action from the actor's distribution
+        given the current state. 
+
+        If eval(), only returns the action 
+        If train() returns action, value, and log prob 
+        '''
         state,is_blocked = obs
         if is_blocked:
             return None
@@ -355,29 +390,20 @@ class InductiveGraphPPOAgent():
         return action.item(), value.item(), prob.item()
 
     def remember(self, idx, s, a, v, p, r, t):
+        '''
+        Save an observation to the agent's memory buffer
+        '''
         self.memory.remember(idx, s,a,v,p,r,t)
 
     def learn(self, verbose=False):
-        '''
-        Assume that an external process is adding memories to
-        the PPOMemory unit, and this is called every so often
+        '''        
+        This runs the PPO update algorithm on memories stored in self.memory 
+        Assumes that an external process is adding memories to the buffer
         '''
         for e in range(self.epochs):
             s,a,v,p,r,t, batches = self.memory.get_batches()
 
-            '''
-            advantage = torch.zeros(len(s), dtype=torch.float)
-
-            # Probably a more efficient way to do this in parallel w torch
-            for t in range(len(s)-1):
-                discount = 1
-                a_t = 0
-                for k in range(t, len(s)-1):
-                    a_t += discount*(r[k] + self.gamma*v[k+1] -v[k])
-                    discount *= self.gamma*self.lmbda
-
-                advantage[t] = a_t
-            '''
+            # Calculate discounted reward
             rewards = []
             discounted_reward = 0
             for reward, is_terminal in zip(reversed(r), reversed(t)):
@@ -386,21 +412,27 @@ class InductiveGraphPPOAgent():
                 discounted_reward = reward + self.gamma * discounted_reward
                 rewards.insert(0, discounted_reward)
 
+            # Normalize 
             r = torch.tensor(rewards, dtype=torch.float)
             r = (r - r.mean()) / (r.std() + 1e-5) # Normalize rewards
 
+            # Calculate advantage 
             advantages = r - torch.tensor(v)
             closs,aloss,eloss = 0,0,0
+
+            # Optimize for clipped advantage for each minibatch 
             for b_idx,b in enumerate(batches):
                 b = b.tolist()
                 new_probs = []
 
+                # Combine graphs from minibatches so GNN is called once
                 s_ = [s[idx] for idx in b]
                 a_ = [a[idx] for idx in b]
                 batched_states = combine_marl_states(s_)
 
                 self._zero_grad()
 
+                # Forward pass 
                 dist = self.actor(*batched_states)
                 critic_vals = self.critic(*batched_states)
 
@@ -432,6 +464,8 @@ class InductiveGraphPPOAgent():
                 total_loss.backward()
                 self._step()
 
+                # Print loss for each minibatch if verbose 
+                # (aggregate loss is printed regardless)
                 if verbose:
                     print(f'[{e}] C-Loss: {0.5*critic_loss.item():0.4f}  A-Loss: {actor_loss.item():0.4f} E-loss: {-entropy_loss.item()*0.01:0.4f}')
 
@@ -439,6 +473,7 @@ class InductiveGraphPPOAgent():
                 aloss += actor_loss.item()
                 eloss += entropy_loss.item()
 
+            # Print avg loss across minibatches
             closs /= len(batches)
             aloss /= len(batches)
             eloss /= len(batches)
@@ -447,17 +482,12 @@ class InductiveGraphPPOAgent():
         # After we have sampled our minibatches e times, clear the memory buffer
         self.memory.clear()
         return total_loss.item()
-    
-    def _zero_grad(self):
-        self.actor.opt.zero_grad()
-        self.critic.opt.zero_grad()
-
-    def _step(self):
-        self.actor.opt.step()
-        self.critic.opt.step()
 
 
-def load_inductive_ppo(in_f='saved_models/inductive_ppo.pt'):
+def load(in_f):
+    '''
+    Loads model checkpoint file 
+    '''
     data = torch.load(in_f)
     args,kwargs = data['agent']
 

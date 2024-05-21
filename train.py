@@ -10,7 +10,7 @@ from CybORG import CybORG
 from CybORG.Agents import SleepAgent, EnterpriseGreenAgent, FiniteStateRedAgent
 from CybORG.Simulator.Scenarios import EnterpriseScenarioGenerator
 
-from models.cage4 import InductiveGraphPPOAgent, load_inductive_ppo
+from models.cage4 import InductiveGraphPPOAgent
 from models.memory_buffer import MultiPPOMemory
 from wrapper.graph_wrapper import GraphWrapper
 from wrapper.observation_graph import ObservationGraph
@@ -109,6 +109,7 @@ def train(agents, hp, seed=SEED):
     # Define learn function for threads to call later so we can 
     # parallelize the backprop step. Use more threads for Agent 4 
     # because they're managing 3 subnets instead of 1 (bigger graph/matrices)
+    # Still not perfectly load-balanced, but close enough
     def learn(i):
             if i < 4:
                 torch.set_num_threads(MAX_THREADS // 9)

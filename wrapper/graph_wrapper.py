@@ -12,18 +12,13 @@ from wrapper.observation_graph import ObservationGraph
 from wrapper.globals import *
 
 class GraphWrapper(EnterpriseMAE):
-    def __init__(self, env: CybORG, *args, track_node_names=False, **kwargs):
+    def __init__(self, env: CybORG, *args, **kwargs):
         super().__init__(env, *args, **kwargs)
 
-        self.graphs = None
+        self.graphs = dict()
         self.env = env
         self.agent_names = [f'blue_agent_{i}' for i in range(5)]
         self.ts = 0
-
-        # If true, get_state and reset return names that correspond
-        # to nodes in the order they are indexed each step
-        self.include_names = track_node_names
-        self.node_names = dict()
 
         self.msg = {
             a:np.zeros(8)
@@ -32,10 +27,9 @@ class GraphWrapper(EnterpriseMAE):
 
     def action_translator(self, agent_name, a_id):
         '''
+        Translates output of PPO model to an action for the CybORG env. 
         Model provides output as
-        Node-actions, edge-actions, global-actions
-        Per subnet. So (particularly for agent 4) actions arent
-        quite in the expected order.
+        Node-actions, edge-actions, global-actions, per-subnet.
         '''
         session = 0 # Seems the same every time?
 
@@ -65,12 +59,19 @@ class GraphWrapper(EnterpriseMAE):
 
             return a(session, agent_name, target.replace('_router',''), which_subnet)
 
-        # Global action
+        # Global action (only one)
         else:
             return Monitor(session, agent_name)
 
 
     def step(self, action):
+        '''
+        Take an action, execute it, and update internal approximation of the
+        environment based on new observation.
+
+        Args: 
+            action: dict of {agent_id (int) : action_id (int)}
+        '''
         # Convert from model out to Action objects
         action = {
             k:self.action_translator(k,v)
@@ -82,15 +83,14 @@ class GraphWrapper(EnterpriseMAE):
             action_dict=action, messages=self.msg
         )
 
-        graph_obs = dict()
-
         # Tell ObservationGraph what happened and update
+        graph_obs = dict()
         for i in range(5):
             agent = f'blue_agent_{i}'
             o = observation[agent]
-            a = action[agent]
             g = self.graphs[agent]
 
+            # Get the raw observation dictionary for this agent
             dict_obs = self.env.environment_controller.get_last_observation(agent).data
             msg = dict_obs.pop('message')
             msg = np.stack(msg, axis=0)
@@ -112,19 +112,24 @@ class GraphWrapper(EnterpriseMAE):
 
             msg = np.concatenate([msg, recieved_msg], axis=1)
 
+            # Update the graph based on the raw dictionary 
             g.parse_observation(dict_obs)
-            tab_x,phase,new_msg = self._parse_tabular(o, g) # Must be called before g.get_state()
+
+            # Pull node features from tabular observation, and also update 
+            # graph subnet connectivity edges. 
+            tab_x,phase,new_msg = self._parse_tabular(o, g) 
+            
             self.msg[agent] = new_msg
 
-            if self.include_names:
-                x,ei,masks,names = g.get_state(MY_SUBNETS[i], include_names=True)
-                self.node_names[agent] = names
-            else:
-                x,ei,masks = g.get_state(MY_SUBNETS[i])
-
+            # Combine node features from graph source, and tabular source
+            x,ei,masks = g.get_state(MY_SUBNETS[i])
             x = self._combine_data(x, tab_x)
+
+            # Mask/pack into conviniently sized tensors for the GNN models 
             obs = self._to_obs(x,ei,masks,phase,msg,new_msg)
 
+            # During training, we need to know if the agent is still mid-action
+            # If so, we don't bother calculating an action next turn 
             is_blocked = dict_obs['success'] == TernaryEnum.IN_PROGRESS
             graph_obs[agent] = (obs, is_blocked)
 
@@ -133,6 +138,9 @@ class GraphWrapper(EnterpriseMAE):
         return graph_obs, reward, term, trunc, info
 
     def reset(self):
+        '''
+        Rebuild internal graph representation with parameters of new environment
+        '''
         self.ts = 0
 
         obs_tab, action_mask = super().reset()
@@ -145,6 +153,7 @@ class GraphWrapper(EnterpriseMAE):
         obs_dict = self.env.environment_controller.init_state
         g.setup(obs_dict)
 
+        # Set message to empty for all agents
         self.msg = {
             a:np.zeros(8)
             for a in self.agent_names
@@ -162,20 +171,20 @@ class GraphWrapper(EnterpriseMAE):
             else:
                 dummy_msg = (np.zeros((4,3)), np.zeros(8))
 
+            # Duplicate shared observation of the initial graph across
+            # all agents (but make sure not to pass by reference)
             g_ = deepcopy(g)
             self.graphs[agent] = g_
 
+            # Get tabular features and update connectivity graph 
             tab_x,phase,_ = self._parse_tabular(o,g_)
 
-            if self.include_names:
-                x,ei,masks,names = g_.get_state(MY_SUBNETS[int(agent[-1])], include_names=True)
-                self.node_names[agent] = names
-            else:
-                x,ei,masks = g_.get_state(MY_SUBNETS[int(agent[-1])])
-
+            # Combine all node features together and package for agents
+            x,ei,masks = g_.get_state(MY_SUBNETS[int(agent[-1])])
             x = self._combine_data(x, tab_x)
             obs = self._to_obs(x,ei,masks,phase, *dummy_msg)
 
+            # By default, agents are not blocked on turn 0
             my_state[agent] = (obs, False)
 
         self.last_obs = my_state
@@ -183,6 +192,23 @@ class GraphWrapper(EnterpriseMAE):
 
 
     def _parse_tabular(self, x, g):
+        '''
+        Pull the per-host data out of the tabular observation. 
+        Data is formatted as 
+        
+        Mission phase           (1d, 0,1, or 2)
+        Subnet info (x8)
+            Subnet id           (9d)
+            Blocked subnets     (9d)
+            Comm policy         (9d)
+            Comprimised hosts   (16d)
+            Scanned hosts       (16d)
+        Messages (4x8)
+
+        We pull out the host data and append it to the host nodes, 
+        pass the phase as a global vector, 
+        and add messages to the subnet nodes they originate from 
+        '''
         # First bit is phase
         # Last 4x8 are messages from other agents
         phase_idx = int(x[0])
@@ -204,6 +230,7 @@ class GraphWrapper(EnterpriseMAE):
             me = ROUTERS[ sn[:9].nonzero()[0][0] ]
             can_maybe_connect_to = (sn[9:18] == 0).nonzero()[0]
 
+            # Logic for subnet routing 
             if INTERNET in can_maybe_connect_to:
                 can_connect_to = [ROUTERS[i] for i in can_maybe_connect_to]
             else:
@@ -231,9 +258,8 @@ class GraphWrapper(EnterpriseMAE):
             end_srv_idx = start_srv_idx + len(srv_idx)
 
             # Note: TabularWrapper goes from server to host, but
-            # graph goes from host to server (alphabetically... as the docs said
-            # everything would be ordered. I digress.) so we have to do some
-            # lifting to rearrange
+            # graph goes from host to server (alphabetically)
+            # so we have to do some lifting to rearrange
             x[start_usr_idx : start_srv_idx] = hosts[usr_idx]
             x[start_srv_idx : end_srv_idx] = hosts[srv_idx]
 
@@ -248,6 +274,7 @@ class GraphWrapper(EnterpriseMAE):
         phase = torch.zeros((1,3))
         phase[0,phase_idx] = 1
 
+        # Make messages all 8-dim and add checkbit to the end
         padding = 8-len(msgs)
         msgs += [0]*padding
         msgs[-1] = 1
@@ -256,6 +283,11 @@ class GraphWrapper(EnterpriseMAE):
         return x,phase,msg
 
     def _combine_data(self, graph_x, tabular_x):
+        '''
+        Stick the tabular data onto the node feature matrix 
+        on the appropriate rows--those corresponding with 
+        the hosts the tabular data is referencing 
+        '''
         # Tabular x only accounts for subnets and workstations
         # Processes/connections have higher indices, but no features
         # from the FlatActionWrapper, so need to be padded before combined
@@ -268,8 +300,21 @@ class GraphWrapper(EnterpriseMAE):
         return torch.cat([graph_x, tabular_x], dim=1)
 
     def _to_obs(self, x,ei,masks,phase, other_msg,my_msg):
-        # Prepare for GNN injestion (assumes unbatched. E.g. this is
-        # called during inference, not training)
+        '''
+        Prepare for GNN injestion (assumes unbatched. E.g. this is
+        called during inference, not training)
+
+        Args:  
+            x: feature matrix           (Nxd tensor)
+            ei: edge index              (2xE tensor)
+            masks: list of bitmaps for servers, users, 
+                   subnet edges, and routers 
+            phase: global state vector  (1x3 tensor)
+            other_msg: messages from other agents
+                                        (4x8 tensor)
+            my_msg: the message this agent sends to 
+                    other agents        (1x8 tensor)
+        '''
 
         # Happens in all cases except agent_4
         if len(masks) == 1:
@@ -278,9 +323,12 @@ class GraphWrapper(EnterpriseMAE):
             all_msg = torch.zeros((x.size(0), 3))
             all_msg[rtrs] = torch.from_numpy(other_msg).float()
 
+            # Edge[0][0] is always the subnet node managed by this agent
             all_msg[edge[0][0], :2] = torch.from_numpy(my_msg[:2]).float()
+
             # Set 'is_recieved' to a special value to indicate this is self
             all_msg[edge[0][0], 2] = -1
+
             x = torch.cat([x, all_msg], dim=1)
 
             return (
@@ -290,6 +338,11 @@ class GraphWrapper(EnterpriseMAE):
                 edge, False
             )
 
+        # If this is agent 4's state, we have to be careful to batch 
+        # three observations together. The graph info is the same, 
+        # so we don't duplicate that, but we have to concat the 
+        # masks together and scatter the messages we recieved
+        # properly to the feature matrix
         srv,usr,edges = [],[],[]
         n_srv,n_usr = [],[]
         my_ids = []

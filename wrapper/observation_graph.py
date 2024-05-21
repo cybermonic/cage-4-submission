@@ -47,10 +47,13 @@ class NodeTracker:
 
 class ObservationGraph:
     '''
-    Seems like the only nodes the blue agent ever sees are
-    Systems, ports (connections), subnets, and files
-    Possibly users and groups on systems could be important, but
-    they don't seem to do anything or appear in file scans?
+    The main datastructure powering KEEP. 
+    This is a graph representing all activity observable to the agents. 
+    There are 4 kinds of nodes: 
+        SystemNode: Computers, servers and routers in the network 
+        ConnectionNode: Processes that can talk to other hosts
+        FileNode: Any new file observed on a host (usually malware)
+        InternetNode: A structural node needed for evaluating P(Block/AllowConnection)
     '''
     NTYPES = {SystemNode: 0, ConnectionNode: 1, FileNode: 2, InternetNode: 3}
     INV_NTYPES = [SystemNode, ConnectionNode, FileNode, InternetNode]
@@ -59,6 +62,7 @@ class ObservationGraph:
     # one-hot vector of node type, plus whatever features that node has
     DIM = len(INV_NTYPES) + sum(NTYPE_DIMS) + 9
 
+    # String representation of what the feature matrix means 
     FEAT_MAP = INV_NTYPES
     for k in INV_NTYPES:
         FEAT_MAP = FEAT_MAP + k(0,dict()).labels
@@ -68,9 +72,8 @@ class ObservationGraph:
     for n in NTYPE_DIMS[:-1]:
         OFFSETS.append(n + OFFSETS[-1])
 
-    # Really seems like this info should just be part of
-    # the observation, but I guess the ports are known and
-    # (in this scenario) don't change..
+    # Used for decoys. Their port ID sometimes isn't explicitly in 
+    # the observation, but it is in the src for each decoy type 
     DECOY_TO_PORT = {
         'apache2': 80,
         'haraka': 25,
@@ -107,14 +110,17 @@ class ObservationGraph:
     def setup(self, initial_observation: dict):
         '''
         Needs to be called before ObservationGraph object can be used.
+        Parses the initial state to create count of hosts in the network, 
+        determine which nodes/edges are permenant parts of the topology, 
+        and sets up initial connections running by default on hosts. 
 
-            initial_observation (dict):
-                The result of env.reset('Blue').observation
+        Args: 
+            initial_observation: output of env.reset('Blue').observation
         '''
-        # So pointless to include this. Just get rid of it
+        # It's the 0th step. Ignore this key 
         succ = initial_observation.pop('success')
 
-        # Some keys were changed. E.g. 'IP Address' -> 'ip_address'
+        # Set up mapping of IPs to hosts 
         self.ip_map = {
             val['Interface'][0]['ip_address']:host
             for host,val in initial_observation.items()
@@ -139,6 +145,11 @@ class ObservationGraph:
         initial_observation['success'] = succ
 
     def set_firewall_rules(self, src, dst):
+        '''
+        Add edges between all nodes from src to dst 
+        Assumes that src and dst are only routers or internet nodes
+        (called from inside wrapper)
+        '''
         src = [self.nids[s] for s in src]
         dst = [self.nids[d] for d in dst]
 
@@ -197,6 +208,10 @@ class ObservationGraph:
                 agent_controlled
             )
     def _remap_sn_mask(self, k, remap):
+        '''
+        Update masks so when state is reindexed, masks still point
+        to the same nodes 
+        '''
         (srv,usr,edge,rtrs) = self.subnet_masks[k]
 
         return (
@@ -210,16 +225,29 @@ class ObservationGraph:
         )
 
     def get_state(self, subnets):
+        '''
+        Get the current state of the graph, and masks for all hosts 
+        in subnet(s) of interest 
+        
+        Args: 
+            subnets: list of routers we want observations w.r.t (strings)
+        '''
+
+        # Cat all edges together
         ei = torch.tensor([
             self.permenant_edges[0] + self.transient_edges[0] + self.subnet_connectivity[0] + self.routers,
             self.permenant_edges[1] + self.transient_edges[1] + self.subnet_connectivity[1] + self.routers
         ])
+
+        # Reindex so we use smallest possible feature vector 
         nids, ei = ei.unique(return_inverse=True)
         nid_map = {n.item():i for i,n in enumerate(nids)}
 
+        # Create mapping from old nids to reindexed nids 
         nodes = [self.nodes[n.item()] for n in nids]
         ntypes = [self.NTYPES[type(n)] for n in nodes]
 
+        # Add features for subnet membership
         rtr_map = {r:i for i,r in enumerate(self.routers)}
         transductive_routers = torch.zeros(nids.size(0), 9)
 
@@ -241,15 +269,29 @@ class ObservationGraph:
                 x[i][offset : offset + node.dim] = torch.from_numpy(node.get_features())
 
         x = torch.cat([x, transductive_routers], dim=1)
+
+        # Remap masks s.t. we know which nodes we are interested in doing
+        # actions upon 
         masks = [self._remap_sn_mask(sn,nid_map) for sn in subnets]
         return x,ei,masks
 
 
     def parse_initial_observation(self, obs):
+        '''
+        Converts from initial dictionary observation describing 
+        entire environment into a graph. 
+
+        Args: 
+            obs: output of env.reset('Blue').observation
+        '''
         edges = set()
         routers = []
 
         # Create all the router nodes
+        # The way this loop is set up ensures that 
+        # nodes are always added in the same order: 
+        #   [subnet, servers, hosts]
+        # For each subnet  
         for hostname, info in obs.items():
             if 'router' in hostname:
                 nid = self.nids[hostname]
@@ -293,7 +335,6 @@ class ObservationGraph:
             if hostname == 'root_internet_host_0':
                 continue
 
-            # TODO add port enum or process enum
             nid = self.nids[hostname]
             for proc in info.get('Processes', []):
                 # Again, represent processes only if they open ports.
@@ -302,7 +343,11 @@ class ObservationGraph:
                     proc_str = f'{hostname}:{conn["local_port"]}'
                     pid = self.nids[proc_str]
 
-                    # Could be useful to include this as well
+                    # Add connection nodes to the graph, so they're marked
+                    # as default services, but don't create an edge to them (yet). 
+                    # Empirically, having edges from default procs to 
+                    # host nodes doesn't help very much (at all?), and
+                    # increases episode generation time by about 20s 
                     conn['process_name'] = proc['process_name']
                     conn['process_type'] = proc['process_type']
                     self.nodes[pid] = ConnectionNode(pid, conn, is_default=True)
@@ -316,6 +361,14 @@ class ObservationGraph:
         return edges
 
     def parse_observation(self, obs):
+        '''
+        Convert dictionary observation from environment into graph edits 
+        Also, if the previous action was successful, modify the graph 
+        if relevant. 
+
+        Args: 
+            obs: Raw observation from environment. 
+        '''
         success = obs.pop('success')
 
         if 'action' in obs:
@@ -324,7 +377,6 @@ class ObservationGraph:
             act = None
 
         if isinstance(act, Restore) and success == TernaryEnum.TRUE:
-            # print("Handling restore")
             # Removes all files/sessions/connections from act.hostname
             # I.e. remove all transient edges involving act.hostname
             host_id = self.nids[act.hostname]
@@ -336,9 +388,10 @@ class ObservationGraph:
                 if v.startswith(act.hostname) and k != host_id
             ]
 
-            #[self.nids.pop(self.nids.inv_mapping[port_id]) for port_id in host_ports]
             removed = [host_id] + host_ports
 
+            # Cycle through existing edges and remove any with 
+            # restored host as src or dst 
             new_edges = [[],[]]
             for i in range(len(self.transient_edges[0])):
                 src = self.transient_edges[0][i]
@@ -348,13 +401,12 @@ class ObservationGraph:
                     new_edges[0].append(src)
                     new_edges[1].append(dst)
 
+            # Remove restored host from list of suspicious machines
             self.transient_edges = new_edges
             if act.hostname in self.host_to_sussy:
                 self.host_to_sussy.pop(act.hostname)
 
         elif isinstance(act, Remove) and success == TernaryEnum.TRUE:
-            # print("handling Remove on:" )
-            # print(act.hostname)
             # Removes all suspicious sessions from act.hostname
             if act.hostname in self.host_to_sussy:
                 sus_ids = self.host_to_sussy.pop()
@@ -409,14 +461,7 @@ class ObservationGraph:
 
                     conn = conn[0]
 
-                    # New to CAGE4!
-                    # Sometimes connections don't have local/remote ports/hosts
-                    # This is definitely information leakage bc you can tell when
-                    # it's a green false alarm because it will always have just a
-                    # local addr and port with no remote component (ignore these!)
-                    # Exploit actions always have non-ephemeral ports as the remote port, while
-                    # green AccessRemote actions always use ephemeral remote ports.
-                    # I think this is a bug because it implies info is flowing the wrong direction?
+                    # Get connection direction 
                     local_addr = conn.get('local_address')
                     local_port = conn.get('local_port')
                     remote_addr = conn.get('remote_address')
@@ -426,11 +471,15 @@ class ObservationGraph:
                     if not (local_addr and remote_addr):
                         continue
 
+                    # Figure out which hosts these IPs belong to 
                     local_host = self.ip_map[local_addr]
                     lh_id = self.nids[local_host]
                     remote_host = self.ip_map[remote_addr]
                     rh_id = self.nids[remote_host]
 
+                    # Add local and remote connection nodes
+                    # If local/remote IPs given, add edges from
+                    # connection to those nodes 
                     if local_port:
                         lp_name = f'{local_host}:{local_port}'
                         lp_id = self.nids[lp_name]
@@ -455,7 +504,6 @@ class ObservationGraph:
                         self.transient_edges[1] += [rp_id, rh_id]
 
                     # Seems like this only happens if proc is suspicious?
-                    # yes seems to be the case.. PID is listed, and list of Connectiosn (port 4444 metasploit shells)
                     if 'PID' in proc:
                         self.host_to_sussy[host_id].append(port_id)
 
