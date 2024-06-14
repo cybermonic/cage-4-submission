@@ -28,7 +28,7 @@ The environment representation is a graph that continually updates as new observ
 <h4 align="center">Figure 2: Graph schema diagram</h4>
 </p>
 
-The observation graph parses the dictionaries provided by CybORG into a graph. We track 5 kinds of entities: Hosts (users and servers), Routers, Open Ports, Files, and the internet. Figure 1 shows how these entities interrelate. Hosts communicate with ports, own files, and are members of a subnet managed by a router. Routers communicate with other routers, and communicate with the internet.
+The observation graph parses the dictionaries provided by CybORG into a graph. We track 5 kinds of entities: Hosts (users and servers), Routers, Open Ports, Files, and the internet. Figure 2 shows how these entities interrelate. Hosts communicate with ports, own files, and are members of a subnet managed by a router. Routers communicate with other routers and communicate with the internet.
 
 Taking actions in the environment may cause new edges or nodes to be added to the graph. Below is a table of the actions and observations that may cause this to occur.
 
@@ -62,19 +62,19 @@ The table below lists all features tracked by the observation graph, and the `Gr
 |   **Files**   | CybORG Enums        | Version, type, vendor, etc. provided in observation dictionaries                                                                     |
 |               | Density             | When a file is `Analyze`d, a density value is provided                                                                               |
 |               | Signed              | When a file is `Analyze`d, a boolean for if it was signed is provided                                                                |
-| **Internet**  | None                | This is a purely structural node type to connect subnets together if they have internet connection                                   |
+| **Internet**  | None                | This is a purely structural node type to connect subnets together if they have Internet connection                                   |
 |    **All**    | Subnet Membership   | One-hot vector denoting which subnet a node belongs to                                                                               |
 |               | Node type           | One-hot vector denoting node type (Host, Port, File, or Internet)                                                                    |
 |               | Tabular Observation | The observation provided by the `EnterpriseMAE` wrapper is parsed, and the information is concatenated with the relevant host nodes  |
-|               | Messages | Any messages recieved from the other agents. Message features are concatenated to the features of the subnets monitored by the agent that sent them. |
+|               | Messages | Any messages received from the other agents. Message features are concatenated to the features of the subnets monitored by the agent that sent them. |
 
-Agents also attempt to send each other messages, if the communication policy for the particular phase allows. These messages are only allowed to consist of 8 bits of information. We use these messages to share the information from the `EnterpriseMAE` wrapper that agents recieved about the machines they monitor. For each subnet an agent monitors, it adds 2 bits of information to represent if *any* host on that subnet is comprimised, or has been scanned. We add an additional bit at the end of the message to act as a checkbit, such that if an agent sends 0's, they mean "no comprimise" if the checkbit is present, and, "agent cannot communicate" if it is not.
+Agents also attempt to send each other messages, if the communication policy for the particular phase allows. These messages are only allowed to consist of 8 bits of information. We use these messages to share the information from the `EnterpriseMAE` wrapper that agents receive about the machines they monitor. For each subnet an agent monitors, it adds 2 bits of information to represent if *any* host on that subnet is compromised, or has been scanned. We add an additional bit at the end of the message to act as a checkbit, such that if an agent sends 0's, they mean "no compromise" if the checkbit is present, and, "agent cannot communicate" if it is not.
 
 ## Agent Architecture
 
 The code powering the agents is contained in the `models/` directory. Here we give a high-level overview of how it works.
 
-Both the actor and the critic models use modified graph convolutional networks (GCNs) [(Kipf & Welling, 2017)](https://arxiv.org/abs/1609.02907) to process the graph states. Additionally, they use a simple self-attention model to combine node features with a global state vector `g`. Both the actor and critic use two of these layers followed by a 2-layer feed-forward neural net to project node embeddings in to action probabilities. This module is illustrated in Figure 2.
+Both the actor and the critic models use modified graph convolutional networks (GCNs) [(Kipf & Welling, 2017)](https://arxiv.org/abs/1609.02907) to process the graph states. Additionally, they use a simple self-attention model to combine node features with a global state vector `g`. Both the actor and critic use two of these layers followed by a 2-layer feed-forward neural net to project node embeddings into action probabilities. This module is illustrated in Figure 3.
 
 <p align="center">
 <img src="img/global_node_arch.png" alt="Agent architecture"/>
@@ -82,13 +82,13 @@ Both the actor and the critic models use modified graph convolutional networks (
 <h4 align="center">Figure 3: Agent architecture diagram</h4>
 </p>
 
-Importantly, our models do not simply output a one-dimensional vector of all action probabilities. Instead, we frame actions as functions upon nodes, edges or the complete environment. Some subset of nodes, `V_a` are "actionable". That is, we can perform actions upon them. In this scenario, these are host nodes, which can be restored, analyzed, or decoyed, and pairs of router nodes (and the internet node), which can be allowed or blocked from communicating. Thus, the actor model outputs a `V_a x |a_n|` dimensional matrix, (here, `|a_n|`=3) of possible node-level actions, a `|E_a| x |a_e|` dimensional matrix of edge-level actions (here `|a_e|`=2), and a `1 x |a_g|` dimensional matrix of global actions (here `|a_g|`=1). The "graph edit" column of Table 1 shows which actions affect which levels.
+Importantly, our models do not simply output a one-dimensional vector of all action probabilities. Instead, we frame actions as functions upon nodes, edges, or the complete environment. Some subset of nodes, `V_a` are "actionable". That is, we can perform actions upon them. In this scenario, these are host nodes, which can be restored, analyzed, or decoyed, and pairs of router nodes (and the internet node), which can be allowed or blocked from communicating. Thus, the actor model outputs a `V_a x |a_n|` dimensional matrix, (here, `|a_n|`=3) of possible node-level actions, a `|E_a| x |a_e|` dimensional matrix of edge-level actions (here `|a_e|`=2), and a `1 x |a_g|` dimensional matrix of global actions (here `|a_g|`=1). The "graph edit" column of Table 1 shows which actions affect which levels.
 
-The critic network, because it is estimating the value of states as a whole only uses the final `g` vector to make its state-value estimates. It passes the final `g` vector through a 2-layer feed-forward neural net to produce a 1-dimensional value estimate.
+The critic network, because it estimates the value of states as a whole only uses the final `g` vector. It passes the final `g` vector through a 2-layer feed-forward neural net to produce a 1-dimensional value estimate.
 
 ## Agent Training
 
-Agents are optimized using the PPO algorithm. Each agent is an indipendant actor-critic network, that learns only from observations it has seen locally. To train the agents, we simulate several episodes in parallel, and generate indipendant memory buffers for each agent. Then, the agents each optimize their own policies via the memories generated in the previous episodes.
+Agents are optimized using the PPO algorithm. Each agent is an independent actor-critic network, that learns only from observations it has seen locally. To train the agents, we simulate several episodes in parallel and generate independent memory buffers for each agent. Then, the agents each optimize their policies via the memories generated in the previous episodes.
 
 <p align="center">
 <img src="img/training.png" alt="Agent loss curve"/>
@@ -96,4 +96,4 @@ Agents are optimized using the PPO algorithm. Each agent is an indipendant actor
 <h4 align="center">Figure 4: Agent architecture diagram</h4>
 </p>
 
-This process repeats indefinitely, but as Figure 3 shows, we found that after about 50k training episodes, the agent converges.
+This process repeats indefinitely, but as Figure 4 shows, we found that after about 50k training episodes, the agent converges.
