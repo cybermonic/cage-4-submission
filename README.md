@@ -8,6 +8,17 @@ This repository contains the code we submitted to the [TTCP CAGE Challenge-4](ht
 <h4 align="center">Figure 1: Graph of the CAGE-4 Environment</h4>
 </p>
 
+## Cite
+
+For more information, please read our paper (preprint [here](https://arxiv.org/pdf/2509.16151))
+
+    @article{king2025automated,
+      title={Automated Cyber Defense with Generalizable Graph-based Reinforcement Learning Agents},
+      author={King, Isaiah J and Bowman, Benjamin and Huang, H Howie},
+      journal={arXiv preprint arXiv:2509.16151},
+      year={2025}
+    }
+
 ## Running the code
 
 We have included a `requirements.txt` file that lists all of the modules necessary to run the code. In addition to this file, it is assumed that `CybORG` for CAGE-4 is in the python path, and its required modules are also in your python environment. This can be accomplished by cloning [their repository](https://github.com/cage-challenge/cage-challenge-4), installing their required packages, and running `echo "path/to/cage-challenge-4/CybORG" > path/to/venv/lib/python3.11/site-packages/CybORG.pth` or using `conda develop path/to/cage-challenge-4/CybORG`.
